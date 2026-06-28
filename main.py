@@ -39,20 +39,19 @@ class AntiNukeBot(commands.Bot):
         prefix = guild_data.get("prefix", DEFAULT_PREFIX)
         return commands.when_mentioned_or(prefix)(self, message)
 
-    async def setup_hook(self):
-       cogs = [
-    "antinuke",
-    "whitelist",
-    "settings",
-    "help",
-]
+  async def setup_hook(self):
+        cogs = [
+            "antinuke",
+            "whitelist",
+            "settings",
+            "help",
+        ]
         for cog in cogs:
             try:
                 await self.load_extension(cog)
                 log.info(f"Loaded cog: {cog}")
             except Exception as e:
                 log.error(f"Failed to load {cog}: {e}")
-
     async def on_ready(self):
         log.info(f"Logged in as {self.user} ({self.user.id})")
         await self.change_presence(
