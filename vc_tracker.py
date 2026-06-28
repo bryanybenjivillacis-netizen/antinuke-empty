@@ -25,11 +25,12 @@ _last_milestone: dict[int, int] = {}
 
 
 def _get_vc_total(guild: discord.Guild) -> int:
-    """Count total non-bot users across all voice channels."""
+    """Count total non-bot users across all voice channels using voice_states."""
     return sum(
-        1 for vc in guild.voice_channels
-        for member in vc.members
-        if not member.bot
+        1 for member, state in guild.voice_states.items()
+        if state.channel is not None
+        and not guild.get_member(member).bot
+        if guild.get_member(member)
     )
 
 
@@ -83,13 +84,14 @@ class VCTracker(commands.Cog):
         last = _last_milestone.get(guild.id, 0)
 
         if joined:
-            # Calculate which milestone we just crossed
+            # Fire when we've accumulated `threshold` new joins since last notification
             current_milestone = (total // threshold) * threshold
             if current_milestone > last and current_milestone > 0:
                 _last_milestone[guild.id] = current_milestone
-                await self._send_notification(guild, vc_cfg["channel_id"], current_milestone)
+                # Pass the real total, not the milestone
+                await self._send_notification(guild, vc_cfg["channel_id"], total)
         else:
-            # On leave, update last milestone downward so future joins re-trigger
+            # On leave, drop milestone so future joins re-trigger at the right point
             current_milestone = (total // threshold) * threshold
             if current_milestone < last:
                 _last_milestone[guild.id] = current_milestone
