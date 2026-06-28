@@ -249,3 +249,7 @@ class VCTracker(commands.Cog):
                 description=f"Mensaje enviado a {channel.mention}.",
                 color=0x2b2d31,
             ))
+
+
+async def setup(bot: commands.Bot):
+    await bot.add_cog(VCTracker(bot))
