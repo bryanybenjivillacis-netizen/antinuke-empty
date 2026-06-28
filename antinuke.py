@@ -6,7 +6,10 @@ Architecture:
   - Each event handler fires, increments the counter, checks threshold
   - If threshold exceeded → immediate punishment (asyncio.create_task for speed)
   - Whitelist checked FIRST before any action
-  - All punishments run concurrently where possible
+  - Audit log executor fetched with up to 3 retries (0.5s apart) to handle Discord's delay
+  - Ban tracker records every ban with timestamp for post-nuke auto-unban
+  - On nuke detection: restore_guild() runs concurrently alongside punishment
+  - Config cached in memory to avoid JSON reads on every event
 """
 
 import discord
@@ -21,19 +24,51 @@ from logger import send_log
 log = logging.getLogger("antinuke.engine")
 
 
-# ─── in-memory rate-limit buckets ────────────────────────────────────────────
-# Structure: counters[guild_id][user_id][action] = deque of timestamps
+# ── In-memory rate-limit buckets ──────────────────────────────────────────────
+# counters[guild_id][user_id][action] = deque of timestamps
 counters: dict[int, dict[int, dict[str, deque]]] = defaultdict(
     lambda: defaultdict(lambda: defaultdict(deque))
 )
+
 # Track users already being punished to avoid double-punishment
 punishing: set[tuple[int, int]] = set()  # (guild_id, user_id)
 
+# Ban tracker: guild_id → list of (user_id, timestamp) recorded by on_member_ban
+# Used by auto-unban to know who was banned during a nuke window
+_ban_log: dict[int, list[tuple[int, datetime]]] = defaultdict(list)
+
+# Config cache: guild_id → (config_dict, cached_at)
+# Invalidated every 60s so changes made via ,antinuke commands propagate quickly
+_config_cache: dict[int, tuple[dict, datetime]] = {}
+_CONFIG_TTL = 60  # seconds
+
+
+# ── Config cache ──────────────────────────────────────────────────────────────
+
+def _get_config(guild_id: int) -> dict:
+    """Return guild config from cache, refreshing if stale."""
+    now = datetime.now(timezone.utc)
+    entry = _config_cache.get(guild_id)
+    if entry:
+        config, cached_at = entry
+        if (now - cached_at).total_seconds() < _CONFIG_TTL:
+            return config
+    config = db.get_guild(guild_id)
+    _config_cache[guild_id] = (config, now)
+    return config
+
+
+def invalidate_config_cache(guild_id: int):
+    """Call this after any ,antinuke / ,settings command that changes config."""
+    _config_cache.pop(guild_id, None)
+
+
+# ── Whitelist / rate-limit helpers ────────────────────────────────────────────
 
 def _is_whitelisted(guild_id: int, user_id: int, bot_owner_ids: set) -> bool:
     if user_id in bot_owner_ids:
         return True
-    config = db.get_guild(guild_id)
+    config = _get_config(guild_id)
     return user_id in config.get("whitelist", [])
 
 
@@ -46,21 +81,54 @@ def _check_rate(guild_id: int, user_id: int, action: str, threshold: int, window
     bucket = counters[guild_id][user_id][action]
     bucket.append(now)
     cutoff = now - timedelta(seconds=window)
-    # prune stale entries
     while bucket and bucket[0] < cutoff:
         bucket.popleft()
     return len(bucket) >= threshold
 
 
+# ── Audit log executor fetch with retry ───────────────────────────────────────
+
+async def _get_executor_with_retry(
+    guild: discord.Guild,
+    action: discord.AuditLogAction,
+    *,
+    retries: int = 3,
+    delay: float = 0.5,
+) -> discord.Member | None:
+    """
+    Fetch the executor of the latest audit log entry for `action`.
+    Retries up to `retries` times with `delay` seconds between attempts
+    to compensate for Discord's 1-3s audit log propagation delay.
+    """
+    for attempt in range(retries):
+        try:
+            async for entry in guild.audit_logs(limit=1, action=action):
+                # Only trust entries from the last 10 seconds
+                age = (datetime.now(timezone.utc) - entry.created_at).total_seconds()
+                if age > 10:
+                    break
+                executor = guild.get_member(entry.user_id)
+                if executor:
+                    return executor
+        except (discord.Forbidden, discord.HTTPException):
+            return None
+
+        if attempt < retries - 1:
+            await asyncio.sleep(delay)
+
+    return None
+
+
+# ── Punishment ────────────────────────────────────────────────────────────────
+
 async def _punish(guild: discord.Guild, member: discord.Member, punishment: str):
-    """Execute the configured punishment. Non-blocking - called via create_task."""
+    """Execute the configured punishment. Called via create_task."""
     key = (guild.id, member.id)
     if key in punishing:
         return
     punishing.add(key)
     try:
-        me = guild.me
-        if not me.guild_permissions.administrator:
+        if not guild.me.guild_permissions.administrator:
             return
 
         if punishment == "ban":
@@ -86,15 +154,48 @@ async def _punish(guild: discord.Guild, member: discord.Member, punishment: str)
         punishing.discard(key)
 
 
+# ── Auto-unban ────────────────────────────────────────────────────────────────
+
+async def _auto_unban(guild: discord.Guild, nuke_detected_at: datetime, window: float = 30.0):
+    """
+    Unban all users that were banned within `window` seconds before nuke detection.
+    Uses the in-memory ban log recorded by on_member_ban.
+    """
+    cutoff = nuke_detected_at - timedelta(seconds=window)
+    victims = [
+        uid for uid, ts in _ban_log.get(guild.id, [])
+        if ts >= cutoff
+    ]
+    if not victims:
+        return
+
+    log.info(f"[{guild.name}] Auto-unban: {len(victims)} user(s) to unban.")
+
+    async def _unban_one(uid: int):
+        try:
+            user = await guild.fetch_ban(discord.Object(id=uid))
+            await guild.unban(user.user, reason="AntiNuke: reversing nuke ban")
+        except discord.NotFound:
+            pass
+        except Exception as e:
+            log.error(f"[{guild.name}] Failed to unban {uid}: {e}")
+
+    # Run all unbans in parallel
+    await asyncio.gather(*[_unban_one(uid) for uid in victims], return_exceptions=True)
+    log.info(f"[{guild.name}] Auto-unban complete.")
+
+
+# ── Central event handler ─────────────────────────────────────────────────────
+
 async def _handle_event(
     guild: discord.Guild,
     executor: discord.Member | None,
     bot: commands.Bot,
-    module_key: str,       # e.g. "anti_ban"
-    action_key: str,       # e.g. "ban"
-    threshold_key: str,    # e.g. "ban_threshold"
-    window_key: str,       # e.g. "ban_window"
-    module_label: str,     # human label for logs
+    module_key: str,
+    action_key: str,
+    threshold_key: str,
+    window_key: str,
+    module_label: str,
     reason: str,
     extra_fields: list | None = None,
 ):
@@ -103,13 +204,12 @@ async def _handle_event(
         return
     if executor.id == bot.user.id:
         return
-    # Ignore bots that are whitelisted
     if _is_whitelisted(guild.id, executor.id, bot.owner_ids):
         return
     if executor.top_role >= guild.me.top_role:
         return
 
-    config = db.get_guild(guild.id)
+    config = _get_config(guild.id)
     an = config.get("antinuke", {})
 
     if not an.get("enabled", False):
@@ -125,26 +225,43 @@ async def _handle_event(
         return
 
     punishment = an.get("punishment", "ban")
+    nuke_detected_at = datetime.now(timezone.utc)
 
-    # Dispatch punishment concurrently
-    asyncio.create_task(_punish(guild, executor, punishment))
+    # Import here to avoid circular import (backup imports nothing from antinuke)
+    try:
+        from backup import restore_guild, get_snapshot
+        has_backup = get_snapshot(guild.id) is not None
+    except ImportError:
+        has_backup = False
+        restore_guild = None
 
-    # Send log concurrently
-    asyncio.create_task(send_log(
-        guild,
-        action=punishment,
-        target=executor,
-        moderator=guild.me,
-        reason=reason,
-        module=module_label,
-        extra_fields=extra_fields,
-    ))
+    # Run punishment, log, auto-unban, and backup restore concurrently
+    tasks = [
+        asyncio.create_task(_punish(guild, executor, punishment)),
+        asyncio.create_task(send_log(
+            guild,
+            action=punishment,
+            target=executor,
+            moderator=guild.me,
+            reason=reason,
+            module=module_label,
+            extra_fields=extra_fields,
+        )),
+        asyncio.create_task(_auto_unban(guild, nuke_detected_at)),
+    ]
 
+    if has_backup and restore_guild:
+        tasks.append(asyncio.create_task(restore_guild(guild, bot)))
+
+    # Tasks are fire-and-forget; errors are caught inside each coroutine
     log.warning(
         f"[{guild.name}] AntiNuke triggered: {module_label} by {executor} "
         f"(threshold={threshold}/{window}s) → {punishment}"
+        + (" + restore" if has_backup else "")
     )
 
+
+# ── Cog ──────────────────────────────────────────────────────────────────────
 
 class AntiNuke(commands.Cog):
     def __init__(self, bot: commands.Bot):
@@ -152,21 +269,8 @@ class AntiNuke(commands.Cog):
 
     # ── helpers ───────────────────────────────────────────────────────────────
 
-    async def _get_audit_executor(
-        self, guild: discord.Guild, action: discord.AuditLogAction, *, limit: int = 1
-    ) -> discord.Member | None:
-        """Fetch the latest audit log entry executor. Fast, minimal overhead."""
-        try:
-            async for entry in guild.audit_logs(limit=limit, action=action):
-                executor = guild.get_member(entry.user_id)
-                return executor
-        except (discord.Forbidden, discord.HTTPException):
-            pass
-        return None
-
     def _check_account_age(self, guild_id: int, user: discord.Member | discord.User) -> bool:
-        """Return True if the user passes account-age check."""
-        config = db.get_guild(guild_id)
+        config = _get_config(guild_id)
         min_days = config["antinuke"].get("min_account_age_days", 0)
         if not min_days:
             return True
@@ -174,8 +278,7 @@ class AntiNuke(commands.Cog):
         return age >= min_days
 
     def _check_guild_age(self, guild_id: int, member: discord.Member) -> bool:
-        """Return True if the member passes guild-join-age check."""
-        config = db.get_guild(guild_id)
+        config = _get_config(guild_id)
         min_days = config["antinuke"].get("min_guild_age_days", 0)
         if not min_days or not member.joined_at:
             return True
@@ -186,12 +289,18 @@ class AntiNuke(commands.Cog):
 
     @commands.Cog.listener()
     async def on_member_ban(self, guild: discord.Guild, user: discord.User):
-        executor = await self._get_audit_executor(guild, discord.AuditLogAction.ban)
+        # Track every ban for auto-unban (regardless of who did it)
+        _ban_log[guild.id].append((user.id, datetime.now(timezone.utc)))
+        # Prune entries older than 5 minutes to keep memory clean
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=5)
+        _ban_log[guild.id] = [(uid, ts) for uid, ts in _ban_log[guild.id] if ts >= cutoff]
+
+        executor = await _get_executor_with_retry(guild, discord.AuditLogAction.ban)
         await _handle_event(
             guild, executor, self.bot,
             "anti_ban", "ban", "ban_threshold", "ban_window",
             "Anti-Ban",
-            f"Exceeded ban threshold",
+            "Exceeded ban threshold",
             extra_fields=[("Banned User", f"`{user}` (`{user.id}`)", False)],
         )
 
@@ -200,14 +309,14 @@ class AntiNuke(commands.Cog):
     @commands.Cog.listener()
     async def on_member_remove(self, member: discord.Member):
         guild = member.guild
-        executor = await self._get_audit_executor(guild, discord.AuditLogAction.kick)
+        executor = await _get_executor_with_retry(guild, discord.AuditLogAction.kick)
         if executor is None:
             return
         await _handle_event(
             guild, executor, self.bot,
             "anti_kick", "kick", "kick_threshold", "kick_window",
             "Anti-Kick",
-            f"Exceeded kick threshold",
+            "Exceeded kick threshold",
             extra_fields=[("Kicked User", f"`{member}` (`{member.id}`)", False)],
         )
 
@@ -216,7 +325,7 @@ class AntiNuke(commands.Cog):
     @commands.Cog.listener()
     async def on_guild_channel_delete(self, channel: discord.abc.GuildChannel):
         guild = channel.guild
-        executor = await self._get_audit_executor(guild, discord.AuditLogAction.channel_delete)
+        executor = await _get_executor_with_retry(guild, discord.AuditLogAction.channel_delete)
         await _handle_event(
             guild, executor, self.bot,
             "anti_channel_delete", "channel_delete",
@@ -231,7 +340,7 @@ class AntiNuke(commands.Cog):
     @commands.Cog.listener()
     async def on_guild_channel_create(self, channel: discord.abc.GuildChannel):
         guild = channel.guild
-        executor = await self._get_audit_executor(guild, discord.AuditLogAction.channel_create)
+        executor = await _get_executor_with_retry(guild, discord.AuditLogAction.channel_create)
         await _handle_event(
             guild, executor, self.bot,
             "anti_channel_create", "channel_create",
@@ -246,7 +355,7 @@ class AntiNuke(commands.Cog):
     @commands.Cog.listener()
     async def on_guild_role_delete(self, role: discord.Role):
         guild = role.guild
-        executor = await self._get_audit_executor(guild, discord.AuditLogAction.role_delete)
+        executor = await _get_executor_with_retry(guild, discord.AuditLogAction.role_delete)
         await _handle_event(
             guild, executor, self.bot,
             "anti_role_delete", "role_delete",
@@ -261,7 +370,7 @@ class AntiNuke(commands.Cog):
     @commands.Cog.listener()
     async def on_guild_role_create(self, role: discord.Role):
         guild = role.guild
-        executor = await self._get_audit_executor(guild, discord.AuditLogAction.role_create)
+        executor = await _get_executor_with_retry(guild, discord.AuditLogAction.role_create)
         await _handle_event(
             guild, executor, self.bot,
             "anti_role_create", "role_create",
@@ -276,7 +385,7 @@ class AntiNuke(commands.Cog):
     @commands.Cog.listener()
     async def on_webhooks_update(self, channel: discord.TextChannel):
         guild = channel.guild
-        executor = await self._get_audit_executor(guild, discord.AuditLogAction.webhook_create)
+        executor = await _get_executor_with_retry(guild, discord.AuditLogAction.webhook_create)
         await _handle_event(
             guild, executor, self.bot,
             "anti_webhook", "webhook_create",
@@ -296,7 +405,7 @@ class AntiNuke(commands.Cog):
             return
 
         guild = message.guild
-        config = db.get_guild(guild.id)
+        config = _get_config(guild.id)
         an = config.get("antinuke", {})
 
         if not an.get("enabled", False):
@@ -330,7 +439,6 @@ class AntiNuke(commands.Cog):
             mentions = len(set(message.mentions))
             if mentions == 0:
                 return
-            # push one entry per mention into the bucket
             for _ in range(mentions):
                 _check_rate(guild.id, message.author.id, "mention", 1, window)
 
@@ -358,14 +466,14 @@ class AntiNuke(commands.Cog):
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member):
         guild = member.guild
-        config = db.get_guild(guild.id)
+        config = _get_config(guild.id)
         an = config.get("antinuke", {})
 
         if not an.get("enabled", False):
             return
 
         if member.bot and an.get("anti_bot_add", True):
-            executor = await self._get_audit_executor(guild, discord.AuditLogAction.bot_add)
+            executor = await _get_executor_with_retry(guild, discord.AuditLogAction.bot_add)
             if executor and not _is_whitelisted(guild.id, executor.id, self.bot.owner_ids):
                 asyncio.create_task(guild.kick(member, reason="AntiNuke: unauthorized bot add"))
                 asyncio.create_task(_punish(guild, executor, an.get("punishment", "ban")))
@@ -385,7 +493,7 @@ class AntiNuke(commands.Cog):
             age = (datetime.now(timezone.utc) - member.created_at).days
             if age < min_age:
                 try:
-                    await member.kick(reason=f"AntiNuke: account too new ({age} days old, minimum {min_age})")
+                    await member.kick(reason=f"AntiNuke: account too new ({age}d, min {min_age}d)")
                     asyncio.create_task(send_log(
                         guild,
                         action="kick",
@@ -401,16 +509,16 @@ class AntiNuke(commands.Cog):
                 except Exception:
                     pass
 
-    # ── ANTI-GUILD UPDATE (server icon, name, etc.) ───────────────────────────
+    # ── ANTI-GUILD UPDATE ─────────────────────────────────────────────────────
 
     @commands.Cog.listener()
     async def on_guild_update(self, before: discord.Guild, after: discord.Guild):
         guild = after
-        config = db.get_guild(guild.id)
+        config = _get_config(guild.id)
         an = config.get("antinuke", {})
         if not an.get("enabled", False) or not an.get("anti_server_update", True):
             return
-        executor = await self._get_audit_executor(guild, discord.AuditLogAction.guild_update)
+        executor = await _get_executor_with_retry(guild, discord.AuditLogAction.guild_update)
         if executor is None or _is_whitelisted(guild.id, executor.id, self.bot.owner_ids):
             return
         if executor.id == self.bot.user.id:
@@ -443,15 +551,14 @@ class AntiNuke(commands.Cog):
 
     @commands.Cog.listener()
     async def on_raw_member_remove(self, payload):
-        # Used to detect member prune via audit log
         guild = self.bot.get_guild(payload.guild_id)
         if not guild:
             return
-        config = db.get_guild(guild.id)
+        config = _get_config(guild.id)
         an = config.get("antinuke", {})
         if not an.get("enabled", False) or not an.get("anti_prune", True):
             return
-        executor = await self._get_audit_executor(guild, discord.AuditLogAction.member_prune)
+        executor = await _get_executor_with_retry(guild, discord.AuditLogAction.member_prune)
         if executor and not _is_whitelisted(guild.id, executor.id, self.bot.owner_ids):
             asyncio.create_task(_punish(guild, executor, an.get("punishment", "ban")))
             asyncio.create_task(send_log(
@@ -469,11 +576,11 @@ class AntiNuke(commands.Cog):
     async def on_guild_emojis_update(self, guild: discord.Guild, before, after):
         if len(before) <= len(after):
             return
-        config = db.get_guild(guild.id)
+        config = _get_config(guild.id)
         an = config.get("antinuke", {})
         if not an.get("enabled", False) or not an.get("anti_emoji_delete", True):
             return
-        executor = await self._get_audit_executor(guild, discord.AuditLogAction.emoji_delete)
+        executor = await _get_executor_with_retry(guild, discord.AuditLogAction.emoji_delete)
         deleted = len(before) - len(after)
         await _handle_event(
             guild, executor, self.bot,
@@ -489,27 +596,17 @@ class AntiNuke(commands.Cog):
     @commands.Cog.listener()
     async def on_guild_role_update(self, before: discord.Role, after: discord.Role):
         guild = after.guild
-        config = db.get_guild(guild.id)
+        config = _get_config(guild.id)
         an = config.get("antinuke", {})
         if not an.get("enabled", False):
             return
-        # Detect dangerous permission grants (administrator, ban_members, manage_guild)
-        dangerous = [
-            discord.Permissions.administrator,
-            discord.Permissions.ban_members,
-            discord.Permissions.manage_guild,
-            discord.Permissions.manage_roles,
-            discord.Permissions.manage_channels,
-        ]
-        new_perms = after.permissions
-        old_perms = before.permissions
         gained = []
         for perm_flag in ["administrator", "ban_members", "manage_guild", "manage_roles", "manage_channels", "kick_members"]:
-            if not getattr(old_perms, perm_flag) and getattr(new_perms, perm_flag):
+            if not getattr(before.permissions, perm_flag) and getattr(after.permissions, perm_flag):
                 gained.append(perm_flag.replace("_", " ").title())
         if not gained:
             return
-        executor = await self._get_audit_executor(guild, discord.AuditLogAction.role_update)
+        executor = await _get_executor_with_retry(guild, discord.AuditLogAction.role_update)
         if executor is None or _is_whitelisted(guild.id, executor.id, self.bot.owner_ids):
             return
         asyncio.create_task(_punish(guild, executor, an.get("punishment", "ban")))
@@ -527,5 +624,5 @@ class AntiNuke(commands.Cog):
         ))
 
 
-async def setup(bot):
+async def setup(bot: commands.Bot):
     await bot.add_cog(AntiNuke(bot))
