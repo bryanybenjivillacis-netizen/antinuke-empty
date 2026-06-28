@@ -40,9 +40,11 @@ class AntiNukeBot(commands.Bot):
 
     async def setup_hook(self):
         cogs = [
+            "backup",
             "antinuke",
             "whitelist",
             "settings",
+            "vc_tracker",
             "help",
         ]
         for cog in cogs:
