@@ -1,0 +1,6 @@
+.env
+data/db.json
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
