@@ -2,7 +2,6 @@ import discord
 from discord.ext import commands
 import asyncio
 import os
-import json
 import logging
 from config import db, DEFAULT_PREFIX
 
@@ -39,7 +38,7 @@ class AntiNukeBot(commands.Bot):
         prefix = guild_data.get("prefix", DEFAULT_PREFIX)
         return commands.when_mentioned_or(prefix)(self, message)
 
-  async def setup_hook(self):
+    async def setup_hook(self):
         cogs = [
             "antinuke",
             "whitelist",
@@ -52,6 +51,7 @@ class AntiNukeBot(commands.Bot):
                 log.info(f"Loaded cog: {cog}")
             except Exception as e:
                 log.error(f"Failed to load {cog}: {e}")
+
     async def on_ready(self):
         log.info(f"Logged in as {self.user} ({self.user.id})")
         await self.change_presence(
@@ -67,21 +67,21 @@ class AntiNukeBot(commands.Bot):
             return
         if isinstance(error, commands.MissingPermissions):
             await ctx.send(embed=discord.Embed(
-                description=f"<:deny:1> You lack the required permissions.",
+                description="No tienes permisos suficientes.",
                 color=0x2b2d31
             ))
         elif isinstance(error, commands.NotOwner):
             await ctx.send(embed=discord.Embed(
-                description="<:deny:1> This command is owner-only.",
+                description="Este comando es solo para el owner.",
                 color=0x2b2d31
             ))
         elif isinstance(error, commands.MissingRequiredArgument):
             await ctx.send(embed=discord.Embed(
-                description=f"<:deny:1> Missing argument: `{error.param.name}`",
+                description=f"Argumento faltante: `{error.param.name}`",
                 color=0x2b2d31
             ))
         else:
-            log.error(f"Unhandled error in {ctx.command}: {error}")
+            log.error(f"Error en {ctx.command}: {error}")
 
 
 async def main():
