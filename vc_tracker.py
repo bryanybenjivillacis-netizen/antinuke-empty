@@ -226,5 +226,26 @@ class VCTracker(commands.Cog):
         ))
 
 
-async def setup(bot: commands.Bot):
-    await bot.add_cog(VCTracker(bot))
+    @commands.command(name="vc")
+    @commands.has_permissions(manage_guild=True)
+    async def vc_manual(self, ctx: commands.Context):
+        """Manda manualmente el embed de VC con el total actual."""
+        guild = ctx.guild
+        vc_cfg = _get_vc_config(guild.id)
+
+        if not vc_cfg.get("channel_id"):
+            return await ctx.send(embed=discord.Embed(
+                description="No hay canal de VC configurado. Usa `,setvc channel #canal` primero.",
+                color=0xed4245,
+            ))
+
+        total = _get_vc_total(guild)
+        await self._send_notification(guild, vc_cfg["channel_id"], total)
+
+        # Si el comando se usó en un canal distinto al de vc, confirma
+        if ctx.channel.id != vc_cfg["channel_id"]:
+            channel = guild.get_channel(int(vc_cfg["channel_id"]))
+            await ctx.send(embed=discord.Embed(
+                description=f"Mensaje enviado a {channel.mention}.",
+                color=0x2b2d31,
+            ))
