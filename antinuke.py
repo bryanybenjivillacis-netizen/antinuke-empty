@@ -16,7 +16,7 @@ from collections import defaultdict, deque
 from datetime import datetime, timezone, timedelta
 import logging
 from config import db
-from utils.logger import send_log
+from logger import send_log
 
 log = logging.getLogger("antinuke.engine")
 
