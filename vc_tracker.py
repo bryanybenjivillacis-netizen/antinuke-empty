@@ -6,10 +6,11 @@ When the total crosses a configurable threshold multiple (default: 5),
 sends an embed to a designated channel.
 
 Commands:
-  ,setvc #channel       — set the notification channel
-  ,setvc threshold <n>  — set how many people trigger a notification
-  ,setvc off            — disable notifications
-  ,setvc status         — show current config
+  ,setvc #channel          — set the notification channel
+  ,setvc threshold <n>     — set how many people trigger a notification
+  ,setvc mention <on|off>  — toggle @everyone mention with notifications
+  ,setvc off               — disable notifications
+  ,setvc status            — show current config
 """
 
 import discord
@@ -38,6 +39,7 @@ def _get_vc_config(guild_id: int) -> dict:
         "channel_id": None,
         "threshold": 5,
         "enabled": False,
+        "mention_everyone": False,
     })
 
 
@@ -97,6 +99,9 @@ class VCTracker(commands.Cog):
         if not channel:
             return
 
+        vc_cfg = _get_vc_config(guild.id)
+        mention_everyone = vc_cfg.get("mention_everyone", False)
+
         embed = discord.Embed(
             description=f"**+{total}** en VC",
             color=0x2b2d31,
@@ -104,7 +109,8 @@ class VCTracker(commands.Cog):
         embed.set_footer(text=guild.name)
 
         try:
-            await channel.send(embed=embed)
+            content = "@everyone" if mention_everyone else None
+            await channel.send(content=content, embed=embed)
         except discord.Forbidden:
             log.warning(f"[{guild.name}] No permission to send VC notification.")
         except Exception as e:
@@ -140,6 +146,7 @@ class VCTracker(commands.Cog):
         embed.add_field(name="Estado", value="`activo`" if enabled else "`inactivo`", inline=True)
         embed.add_field(name="Canal", value=channel.mention if channel else "`no configurado`", inline=True)
         embed.add_field(name="Umbral", value=f"`cada {threshold} personas`", inline=True)
+        embed.add_field(name="@everyone", value="`on`" if vc_cfg.get("mention_everyone") else "`off`", inline=True)
         embed.add_field(name="En VC ahora", value=f"`{total} personas`", inline=True)
         await ctx.send(embed=embed)
 
@@ -177,6 +184,29 @@ class VCTracker(commands.Cog):
         await ctx.send(embed=discord.Embed(
             description=f"Umbral configurado: notifica cada `{n}` personas en VC.",
             color=0x57f287,
+        ))
+
+    @setvc.command(name="mention")
+    @commands.has_permissions(manage_guild=True)
+    async def setvc_mention(self, ctx: commands.Context, state: str):
+        """Toggle @everyone mention on VC notifications. Example: ,setvc mention on"""
+        state = state.lower()
+        if state not in ("on", "off"):
+            return await ctx.send(embed=discord.Embed(
+                description="Usa `on` o `off`.",
+                color=0xed4245,
+            ))
+
+        enabled = state == "on"
+        vc_cfg = _get_vc_config(ctx.guild.id)
+        vc_cfg["mention_everyone"] = enabled
+        _save_vc_config(ctx.guild.id, vc_cfg)
+
+        word = "activado" if enabled else "desactivado"
+        color = 0x57f287 if enabled else 0xed4245
+        await ctx.send(embed=discord.Embed(
+            description=f"@everyone en notificaciones de VC **{word}**.",
+            color=color,
         ))
 
     @setvc.command(name="off")
