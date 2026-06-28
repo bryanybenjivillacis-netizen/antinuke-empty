@@ -40,12 +40,12 @@ class AntiNukeBot(commands.Bot):
         return commands.when_mentioned_or(prefix)(self, message)
 
     async def setup_hook(self):
-        cogs = [
-            "cogs.antinuke",
-            "cogs.whitelist",
-            "cogs.settings",
-            "cogs.help",
-        ]
+       cogs = [
+    "antinuke",
+    "whitelist",
+    "settings",
+    "help",
+]
         for cog in cogs:
             try:
                 await self.load_extension(cog)
