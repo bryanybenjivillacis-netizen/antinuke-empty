@@ -389,5 +389,95 @@ class Settings(commands.Cog):
         await ctx.send(embed=build_embed(ctx.guild, f"Log embed thumbnail **{word}**.", 0x57f287))
 
 
+    # ── ,status ───────────────────────────────────────────────────────────────
+
+    @commands.group(name="status", invoke_without_command=True)
+    @commands.is_owner()
+    async def status_cmd(self, ctx, activity_type: str = None, *, text: str = None):
+        """
+        Change the bot's status and activity. (Bot owner only)
+
+        Activity types: watching, playing, listening, competing
+        Examples:
+          ,status watching 100 servers
+          ,status playing algo
+          ,status listening música
+          ,status dnd
+          ,status online
+          ,status idle
+          ,status invisible
+          ,status clear        — removes activity
+        """
+        if activity_type is None:
+            return await ctx.send(embed=discord.Embed(
+                description=(
+                    "**,status** — cambia el status del bot.\n\n"
+                    "`,status watching <texto>`\n"
+                    "`,status playing <texto>`\n"
+                    "`,status listening <texto>`\n"
+                    "`,status competing <texto>`\n"
+                    "`,status online` · `dnd` · `idle` · `invisible`\n"
+                    "`,status clear` — quita la actividad"
+                ),
+                color=0x2b2d31,
+            ))
+
+        activity_type = activity_type.lower()
+
+        # ── Status only (no activity text) ────────────────────────────────────
+        status_map = {
+            "online":    discord.Status.online,
+            "dnd":       discord.Status.dnd,
+            "idle":      discord.Status.idle,
+            "invisible": discord.Status.invisible,
+        }
+        if activity_type in status_map:
+            await self.bot.change_presence(status=status_map[activity_type])
+            return await ctx.send(embed=discord.Embed(
+                description=f"Status cambiado a `{activity_type}`.",
+                color=0x57f287,
+            ))
+
+        # ── Clear activity ────────────────────────────────────────────────────
+        if activity_type == "clear":
+            await self.bot.change_presence(activity=None)
+            return await ctx.send(embed=discord.Embed(
+                description="Actividad removida.",
+                color=0x57f287,
+            ))
+
+        # ── Activity types ────────────────────────────────────────────────────
+        if not text:
+            return await ctx.send(embed=discord.Embed(
+                description=f"Falta el texto. Ejemplo: `,status {activity_type} tu texto aquí`",
+                color=0xed4245,
+            ))
+
+        activity_type_map = {
+            "watching":   discord.ActivityType.watching,
+            "playing":    discord.ActivityType.playing,
+            "listening":  discord.ActivityType.listening,
+            "competing":  discord.ActivityType.competing,
+        }
+        if activity_type not in activity_type_map:
+            return await ctx.send(embed=discord.Embed(
+                description=(
+                    f"Tipo inválido `{activity_type}`.\n"
+                    "Usa: `watching` · `playing` · `listening` · `competing`"
+                ),
+                color=0xed4245,
+            ))
+
+        activity = discord.Activity(
+            type=activity_type_map[activity_type],
+            name=text,
+        )
+        await self.bot.change_presence(activity=activity)
+        await ctx.send(embed=discord.Embed(
+            description=f"Actividad: `{activity_type} {text}`",
+            color=0x57f287,
+        ))
+
+
 async def setup(bot):
     await bot.add_cog(Settings(bot))
