@@ -42,6 +42,11 @@ _ban_log: dict[int, list[tuple[int, datetime]]] = defaultdict(list)
 _config_cache: dict[int, tuple[dict, datetime]] = {}
 _CONFIG_TTL = 60  # seconds
 
+# Executor cache: (guild_id, action) → (member, cached_at)
+# Si el mismo action vuelve a ocurrir en 5s, skip audit log fetch
+_executor_cache: dict = {}
+_EXECUTOR_TTL = 5  # seconds
+
 
 # ── Config cache ──────────────────────────────────────────────────────────────
 
@@ -93,28 +98,40 @@ async def _get_executor_with_retry(
     action: discord.AuditLogAction,
     *,
     retries: int = 3,
-    delay: float = 0.5,
 ) -> discord.Member | None:
     """
-    Fetch the executor of the latest audit log entry for `action`.
-    Retries up to `retries` times with `delay` seconds between attempts
-    to compensate for Discord's 1-3s audit log propagation delay.
+    Fetch the executor for `action`.
+    - Si hay un ejecutor cacheado para este action en los últimos 5s, lo retorna inmediato.
+    - Si no, intenta 3 veces con delays 0s, 0.3s, 0.5s (más agresivo que antes).
+    - Guarda el resultado en caché para el siguiente evento.
     """
+    cache_key = (guild.id, str(action))
+    now = datetime.now(timezone.utc)
+
+    # Hit de caché: mismo ejecutor, mismo action, hace menos de 5s
+    cached = _executor_cache.get(cache_key)
+    if cached:
+        member, cached_at = cached
+        if (now - cached_at).total_seconds() < _EXECUTOR_TTL:
+            # Verificar que el miembro sigue en el servidor
+            if guild.get_member(member.id):
+                return member
+
+    delays = [0, 0.3, 0.5]
     for attempt in range(retries):
+        if delays[attempt] > 0:
+            await asyncio.sleep(delays[attempt])
         try:
             async for entry in guild.audit_logs(limit=1, action=action):
-                # Only trust entries from the last 10 seconds
-                age = (datetime.now(timezone.utc) - entry.created_at).total_seconds()
+                age = (now - entry.created_at).total_seconds()
                 if age > 10:
                     break
                 executor = guild.get_member(entry.user_id)
                 if executor:
+                    _executor_cache[cache_key] = (executor, now)
                     return executor
         except (discord.Forbidden, discord.HTTPException):
             return None
-
-        if attempt < retries - 1:
-            await asyncio.sleep(delay)
 
     return None
 
