@@ -1,14 +1,10 @@
 """
 vc_tracker.py — Real-time voice channel population tracker.
 
-Tracks the total number of users across all VCs in a guild.
-When the total crosses a configurable threshold multiple, sends an embed
-to a designated channel.
-
 Commands:
   ,setvc channel #canal    — configura canal de notificaciones automáticas
   ,setvc threshold <n>     — cada cuántas personas notifica (default 5)
-  ,vcstats                 — manda embed con total exacto en VC (solo admins)
+  ,vcstats                 — manda embed con total exacto en VC (manage_guild)
 """
 
 import discord
@@ -23,13 +19,13 @@ _last_milestone: dict[int, int] = {}
 
 
 def _get_vc_total(guild: discord.Guild) -> int:
-    """Count total non-bot users across all voice channels using voice_states."""
-    return sum(
-        1 for member_id, state in guild.voice_states.items()
-        if state.channel is not None
-        and (m := guild.get_member(member_id)) is not None
-        and not m.bot
-    )
+    """Count total non-bot users across all voice channels."""
+    total = 0
+    for vc in guild.voice_channels:
+        for member in vc.members:
+            if not member.bot:
+                total += 1
+    return total
 
 
 def _get_vc_config(guild_id: int) -> dict:
@@ -78,7 +74,6 @@ class VCTracker(commands.Cog):
         if not vc_cfg.get("enabled") or not vc_cfg.get("channel_id"):
             return
 
-        # Solo nos importan entradas y salidas, no mute/deafen/moves internos
         joined = after.channel is not None and before.channel != after.channel
         left = after.channel is None and before.channel is not None
 
@@ -111,7 +106,6 @@ class VCTracker(commands.Cog):
     @commands.group(name="setvc", invoke_without_command=True)
     @commands.has_permissions(manage_guild=True)
     async def setvc(self, ctx: commands.Context):
-        """VC tracker — usa: ,setvc channel #canal | ,setvc threshold <n>"""
         await ctx.send(embed=discord.Embed(
             description="Usa `,setvc channel #canal` o `,setvc threshold <número>`.",
             color=0x2b2d31,
@@ -120,12 +114,11 @@ class VCTracker(commands.Cog):
     @setvc.command(name="channel")
     @commands.has_permissions(manage_guild=True)
     async def setvc_channel(self, ctx: commands.Context, channel: discord.TextChannel):
-        """Configura canal de notificaciones automáticas. Ejemplo: ,setvc channel #canal"""
+        """Ejemplo: ,setvc channel #canal"""
         vc_cfg = _get_vc_config(ctx.guild.id)
         vc_cfg["channel_id"] = channel.id
         vc_cfg["enabled"] = True
         _save_vc_config(ctx.guild.id, vc_cfg)
-
         await ctx.send(embed=discord.Embed(
             description=f"Canal configurado: {channel.mention}",
             color=0x57f287,
@@ -134,18 +127,16 @@ class VCTracker(commands.Cog):
     @setvc.command(name="threshold")
     @commands.has_permissions(manage_guild=True)
     async def setvc_threshold(self, ctx: commands.Context, n: int):
-        """Configura cada cuántas personas notifica. Ejemplo: ,setvc threshold 10"""
+        """Ejemplo: ,setvc threshold 10"""
         if n < 1:
             return await ctx.send(embed=discord.Embed(
                 description="El umbral debe ser al menos `1`.",
                 color=0xed4245,
             ))
-
         vc_cfg = _get_vc_config(ctx.guild.id)
         vc_cfg["threshold"] = n
         _save_vc_config(ctx.guild.id, vc_cfg)
         _last_milestone.pop(ctx.guild.id, None)
-
         await ctx.send(embed=discord.Embed(
             description=f"Notificación automática cada `{n}` personas en VC.",
             color=0x57f287,
@@ -157,8 +148,15 @@ class VCTracker(commands.Cog):
     @commands.has_permissions(manage_guild=True)
     async def vcstats(self, ctx: commands.Context):
         """Manda embed con el total exacto de personas en VC ahora mismo."""
-        total = _get_vc_total(ctx.guild)
-        await ctx.send(embed=_build_embed(total, ctx.guild))
+        try:
+            total = _get_vc_total(ctx.guild)
+            await ctx.send(embed=_build_embed(total, ctx.guild))
+        except Exception as e:
+            log.error(f"[{ctx.guild.name}] vcstats error: {e}")
+            await ctx.send(embed=discord.Embed(
+                description=f"Error: `{e}`",
+                color=0xed4245,
+            ))
 
 
 async def setup(bot: commands.Bot):
