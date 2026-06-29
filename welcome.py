@@ -70,40 +70,57 @@ def _resolve_vars(text: str, member: discord.Member) -> str:
     )
 
 
+def _resolve_vars_in_dict(entry: dict, member: discord.Member) -> dict:
+    """Resuelve todas las variables en un diccionario de entrada."""
+    resolved = entry.copy()
+    for key in ["message", "author", "description", "thumbnail"]:
+        if key in resolved and resolved[key]:
+            resolved[key] = _resolve_vars(resolved[key], member)
+    if "buttons" in resolved:
+        resolved["buttons"] = [
+            {
+                "url": _resolve_vars(btn["url"], member),
+                "label": _resolve_vars(btn["label"], member)
+            }
+            for btn in resolved["buttons"]
+        ]
+    return resolved
+
+
 def _build_embed(entry: dict, member: discord.Member) -> tuple[discord.Embed, str, list[discord.ui.Button]]:
     """Construye embed + content + botones a partir de una entrada guardada."""
+    # Resolvemos TODAS las variables primero
+    resolved_entry = _resolve_vars_in_dict(entry, member)
+    
     # Content (mensaje fuera del embed)
-    content = _resolve_vars(entry.get("message", ""), member) if entry.get("message") else None
-
+    content = resolved_entry.get("message", None)
+    
     # Embed
     embed = discord.Embed(color=0x2b2d31)
-
-    author_raw = entry.get("author", "")
+    
+    author_raw = resolved_entry.get("author", "")
     if author_raw:
-        # formato: "texto && url_icono" — el && separa texto de icon_url opcional
         parts = [p.strip() for p in author_raw.split("&&")]
-        author_text = _resolve_vars(parts[0], member)
+        author_text = parts[0]
         icon_url = parts[1] if len(parts) > 1 and parts[1].startswith("http") else None
         embed.set_author(name=author_text, icon_url=icon_url)
-
-    desc_raw = entry.get("description", "")
+    
+    desc_raw = resolved_entry.get("description", "")
     if desc_raw:
-        embed.description = _resolve_vars(desc_raw, member)
-
-    thumb_raw = entry.get("thumbnail", "")
-    if thumb_raw:
-        resolved = _resolve_vars(thumb_raw, member)
-        if resolved.startswith("http"):
-            embed.set_thumbnail(url=resolved)
-
+        embed.description = desc_raw
+    
+    thumb_raw = resolved_entry.get("thumbnail", "")
+    if thumb_raw and thumb_raw.startswith("http"):
+        embed.set_thumbnail(url=thumb_raw)
+    
     # Botones
     buttons = []
-    for btn in entry.get("buttons", []):
-        url = _resolve_vars(btn["url"], member)
-        label = _resolve_vars(btn["label"], member)
+    for btn in resolved_entry.get("buttons", []):
+        url = btn["url"]
+        label = btn["label"]
         if url.startswith("http"):
             buttons.append(discord.ui.Button(label=label, url=url, style=discord.ButtonStyle.link))
-
+    
     return embed, content, buttons
 
 
