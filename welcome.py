@@ -167,6 +167,8 @@ class Welcome(commands.Cog):
         """
         parsed = _parse_vargs(config_text)
 
+        # Guardamos el texto ORIGINAL con las variables sin resolver
+        # para que se resuelvan cuando un nuevo miembro entre
         entry = {
             "channel_id": channel.id,
             "message":     parsed.get("message", ""),
@@ -180,8 +182,19 @@ class Welcome(commands.Cog):
         entries.append(entry)
         _save_welcomes(ctx.guild.id, entries)
 
+        # Mostramos una previsualización al usuario que configuró
+        embed, content, buttons = _build_embed(entry, ctx.author)
+        preview_msg = "**✅ Welcome agregado! Previsualización:**\n"
+        if buttons:
+            view = discord.ui.View()
+            for btn in buttons:
+                view.add_item(btn)
+            await ctx.send(content=preview_msg, embed=embed, view=view)
+        else:
+            await ctx.send(content=preview_msg, embed=embed)
+
         await ctx.send(embed=discord.Embed(
-            description=f"Welcome agregado en {channel.mention}. Entrada #{len(entries)}.\nUsa `,welcome test` para previsualizar.",
+            description=f"Welcome guardado en {channel.mention}. Entrada #{len(entries)}.",
             color=0x57f287,
         ))
 
