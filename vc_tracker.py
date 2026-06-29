@@ -154,7 +154,7 @@ class VCTracker(commands.Cog):
     # ── ,vcstats ──────────────────────────────────────────────────────────────
 
     @commands.command(name="vcstats")
-    @commands.has_permissions(administrator=True)
+    @commands.has_permissions(manage_guild=True)
     async def vcstats(self, ctx: commands.Context):
         """Manda embed con el total exacto de personas en VC ahora mismo."""
         total = _get_vc_total(ctx.guild)
