@@ -41,12 +41,12 @@ def _extract_vblocks(text: str) -> list[str]:
             elif text[j] == '}':
                 depth -= 1
                 if depth == 0:
-                    blocks.append(text[start + 3:j])  # interior sin '$v{' y '}'
+                    blocks.append(text[start + 3:j])
                     i = j + 1
                     break
             j += 1
         else:
-            break  # bloque sin cerrar, ignorar
+            break
     return blocks
 
 
@@ -94,57 +94,40 @@ def _resolve_vars(text: str, member: discord.Member) -> str:
     )
 
 
-def _resolve_vars_in_dict(entry: dict, member: discord.Member) -> dict:
-    """Resuelve todas las variables en un diccionario de entrada."""
-    resolved = entry.copy()
-    for key in ["message", "author", "description", "thumbnail"]:
-        if key in resolved and resolved[key]:
-            resolved[key] = _resolve_vars(resolved[key], member)
-    if "buttons" in resolved:
-        resolved["buttons"] = [
-            {
-                "url": _resolve_vars(btn["url"], member),
-                "label": _resolve_vars(btn["label"], member)
-            }
-            for btn in resolved["buttons"]
-        ]
-    return resolved
-
-
 def _build_embed(entry: dict, member: discord.Member) -> tuple[discord.Embed, str, list[discord.ui.Button]]:
     """Construye embed + content + botones a partir de una entrada guardada."""
-    # Resolvemos TODAS las variables primero
-    resolved_entry = _resolve_vars_in_dict(entry, member)
-    
     # Content (mensaje fuera del embed)
-    content = resolved_entry.get("message", None)
-    
+    content = _resolve_vars(entry.get("message", ""), member) if entry.get("message") else None
+
     # Embed
     embed = discord.Embed(color=0x2b2d31)
-    
-    author_raw = resolved_entry.get("author", "")
+
+    author_raw = entry.get("author", "")
     if author_raw:
+        # formato: "texto && url_icono" — el && separa texto de icon_url opcional
         parts = [p.strip() for p in author_raw.split("&&")]
-        author_text = parts[0]
+        author_text = _resolve_vars(parts[0], member)
         icon_url = parts[1] if len(parts) > 1 and parts[1].startswith("http") else None
         embed.set_author(name=author_text, icon_url=icon_url)
-    
-    desc_raw = resolved_entry.get("description", "")
+
+    desc_raw = entry.get("description", "")
     if desc_raw:
-        embed.description = desc_raw
-    
-    thumb_raw = resolved_entry.get("thumbnail", "")
-    if thumb_raw and thumb_raw.startswith("http"):
-        embed.set_thumbnail(url=thumb_raw)
-    
+        embed.description = _resolve_vars(desc_raw, member)
+
+    thumb_raw = entry.get("thumbnail", "")
+    if thumb_raw:
+        resolved = _resolve_vars(thumb_raw, member)
+        if resolved.startswith("http"):
+            embed.set_thumbnail(url=resolved)
+
     # Botones
     buttons = []
-    for btn in resolved_entry.get("buttons", []):
-        url = btn["url"]
-        label = btn["label"]
+    for btn in entry.get("buttons", []):
+        url = _resolve_vars(btn["url"], member)
+        label = _resolve_vars(btn["label"], member)
         if url.startswith("http"):
             buttons.append(discord.ui.Button(label=label, url=url, style=discord.ButtonStyle.link))
-    
+
     return embed, content, buttons
 
 
@@ -208,8 +191,6 @@ class Welcome(commands.Cog):
         """
         parsed = _parse_vargs(config_text)
 
-        # Guardamos el texto ORIGINAL con las variables sin resolver
-        # para que se resuelvan cuando un nuevo miembro entre
         entry = {
             "channel_id": channel.id,
             "message":     parsed.get("message", ""),
@@ -223,19 +204,8 @@ class Welcome(commands.Cog):
         entries.append(entry)
         _save_welcomes(ctx.guild.id, entries)
 
-        # Mostramos una previsualización al usuario que configuró
-        embed, content, buttons = _build_embed(entry, ctx.author)
-        preview_msg = "**✅ Welcome agregado! Previsualización:**\n"
-        if buttons:
-            view = discord.ui.View()
-            for btn in buttons:
-                view.add_item(btn)
-            await ctx.send(content=preview_msg, embed=embed, view=view)
-        else:
-            await ctx.send(content=preview_msg, embed=embed)
-
         await ctx.send(embed=discord.Embed(
-            description=f"Welcome guardado en {channel.mention}. Entrada #{len(entries)}.",
+            description=f"Welcome agregado en {channel.mention}. Entrada #{len(entries)}.\nUsa `,welcome test` para previsualizar.",
             color=0x57f287,
         ))
 
