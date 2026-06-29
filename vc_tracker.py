@@ -11,6 +11,7 @@ import discord
 from discord.ext import commands
 from config import db
 import logging
+from datetime import datetime, timezone, timedelta
 
 log = logging.getLogger("antinuke.vc_tracker")
 
@@ -90,9 +91,8 @@ class VCTracker(commands.Cog):
             if current_milestone > last and current_milestone > 0:
                 _last_milestone[guild.id] = current_milestone
                 # Cooldown: no enviar más de una vez cada 12 minutos
-                from datetime import datetime, timezone, timedelta
-                last = _last_sent.get(guild.id)
-                if last and (datetime.now(timezone.utc) - last).total_seconds() < 720:
+                last_sent = _last_sent.get(guild.id)
+                if last_sent and (datetime.now(timezone.utc) - last_sent).total_seconds() < 720:
                     return
                 _last_sent[guild.id] = datetime.now(timezone.utc)
                 channel = guild.get_channel(int(vc_cfg["channel_id"]))
