@@ -16,12 +16,39 @@ import discord
 from discord.ext import commands
 from config import db
 import logging
-import re
 
 log = logging.getLogger("antinuke.welcome")
 
 
 # ── Parser de sintaxis $v{key: value} ────────────────────────────────────────
+
+def _extract_vblocks(text: str) -> list[str]:
+    """
+    Extrae el contenido interior de cada bloque $v{...}, respetando
+    llaves anidadas (ej: {user.mention} dentro de $v{message: ...}).
+    """
+    blocks = []
+    i = 0
+    while i < len(text):
+        start = text.find("$v{", i)
+        if start == -1:
+            break
+        depth = 0
+        j = start + 2  # apunta a '{'
+        while j < len(text):
+            if text[j] == '{':
+                depth += 1
+            elif text[j] == '}':
+                depth -= 1
+                if depth == 0:
+                    blocks.append(text[start + 3:j])  # interior sin '$v{' y '}'
+                    i = j + 1
+                    break
+            j += 1
+        else:
+            break  # bloque sin cerrar, ignorar
+    return blocks
+
 
 def _parse_vargs(text: str) -> dict:
     """
@@ -30,10 +57,7 @@ def _parse_vargs(text: str) -> dict:
     Soporta múltiples 'button' → lista.
     """
     result = {"buttons": []}
-    # Encuentra todos los bloques $v{...}
-    pattern = re.compile(r'\$v\{([^}]+)\}', re.DOTALL)
-    for match in pattern.finditer(text):
-        block = match.group(1)
+    for block in _extract_vblocks(text):
         # Separar key: value en el primer ':'
         if ':' not in block:
             continue
