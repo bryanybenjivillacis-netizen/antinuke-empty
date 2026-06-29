@@ -16,6 +16,7 @@ log = logging.getLogger("antinuke.vc_tracker")
 
 # In-memory: guild_id → last notified milestone
 _last_milestone: dict[int, int] = {}
+_last_sent: dict[int, datetime] = {}  # guild_id → última vez que se mandó notif
 
 
 def _get_vc_total(guild: discord.Guild) -> int:
@@ -88,6 +89,12 @@ class VCTracker(commands.Cog):
             current_milestone = (total // threshold) * threshold
             if current_milestone > last and current_milestone > 0:
                 _last_milestone[guild.id] = current_milestone
+                # Cooldown: no enviar más de una vez cada 12 minutos
+                from datetime import datetime, timezone, timedelta
+                last = _last_sent.get(guild.id)
+                if last and (datetime.now(timezone.utc) - last).total_seconds() < 720:
+                    return
+                _last_sent[guild.id] = datetime.now(timezone.utc)
                 channel = guild.get_channel(int(vc_cfg["channel_id"]))
                 if channel:
                     try:
