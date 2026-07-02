@@ -106,16 +106,19 @@ class JoinGiveawayView(discord.ui.View):
         participants = data.get("participants", [])
         if uid in participants:
             participants.remove(uid)
-            data["participants"] = participants
-            giveaways[str(self.message_id)] = data
-            _save_giveaways(self.guild_id, giveaways)
-            await interaction.response.send_message("Saliste del giveaway.", ephemeral=True)
+            msg = "Saliste del giveaway."
         else:
             participants.append(uid)
-            data["participants"] = participants
-            giveaways[str(self.message_id)] = data
-            _save_giveaways(self.guild_id, giveaways)
-            await interaction.response.send_message("¡Te uniste al giveaway! 🎉", ephemeral=True)
+            msg = "¡Te uniste al giveaway! 🎉"
+        data["participants"] = participants
+        giveaways[str(self.message_id)] = data
+        _save_giveaways(self.guild_id, giveaways)
+
+        # Actualizar embed con nuevo conteo
+        end_time = datetime.fromisoformat(data["end_time"])
+        embed = _build_giveaway_embed(data["prize"], end_time, participants=len(participants))
+        await interaction.response.edit_message(embed=embed)
+        await interaction.followup.send(msg, ephemeral=True)
 
 
 
