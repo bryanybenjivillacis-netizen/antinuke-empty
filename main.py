@@ -46,8 +46,6 @@ class AntiNukeBot(commands.Bot):
             "settings",
             "vc_tracker",
             "welcome",
-            "invites",
-            "giveaway",
             "help",
         ]
         for cog in cogs:
@@ -55,7 +53,8 @@ class AntiNukeBot(commands.Bot):
                 await self.load_extension(cog)
                 log.info(f"Loaded cog: {cog}")
             except Exception as e:
-                log.error(f"Failed to load {cog}: {e}")
+                import traceback
+                log.error(f"Failed to load {cog}:\n{traceback.format_exc()}")
 
     async def on_ready(self):
         log.info(f"Logged in as {self.user} ({self.user.id})")
