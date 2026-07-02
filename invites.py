@@ -30,8 +30,10 @@ def _get_config(guild_id: int) -> dict:
         "channel_id": None,
         "threshold": 5,
         "altdays": 3,
+        "reward": "",      # texto de recompensa del milestone
         "counts": {},      # user_id (str) → int
         "milestones": {},  # user_id (str) → último milestone notificado
+        "invited_by": {},  # user_id (str) → [lista de user_ids invitados]
     })
 
 
@@ -48,11 +50,16 @@ def _is_alt(member: discord.Member, altdays: int) -> bool:
     return age < altdays
 
 
-def _build_milestone_embed(inviter: discord.Member, count: int) -> discord.Embed:
+def _build_milestone_embed(inviter: discord.Member, count: int, reward: str, invited_ids: list) -> discord.Embed:
     embed = discord.Embed(
         description=f"{inviter.mention} consiguió invitar **{count} personas** al servidor 🎉",
         color=0x2b2d31,
     )
+    if reward:
+        embed.add_field(name="Recompensa", value=reward, inline=False)
+    if invited_ids:
+        mentions = " ".join(f"<@{uid}>" for uid in invited_ids[-count:])
+        embed.add_field(name="Personas invitadas", value=mentions, inline=False)
     embed.set_thumbnail(url=inviter.display_avatar.url)
     embed.set_footer(text=inviter.guild.name)
     return embed
@@ -125,6 +132,11 @@ class Invites(commands.Cog):
         counts = cfg.get("counts", {})
         counts[uid] = counts.get(uid, 0) + 1
         cfg["counts"] = counts
+        invited_by = cfg.get("invited_by", {})
+        invited_by.setdefault(uid, [])
+        if member.id not in invited_by[uid]:
+            invited_by[uid].append(member.id)
+        cfg["invited_by"] = invited_by
         _save_config(guild.id, cfg)
 
         # Milestone
@@ -147,7 +159,9 @@ class Invites(commands.Cog):
             inviter_member = guild.get_member(inviter.id)
             if channel and inviter_member:
                 try:
-                    await channel.send(embed=_build_milestone_embed(inviter_member, current_milestone))
+                    reward = cfg.get("reward", "")
+                    invited_ids = cfg.get("invited_by", {}).get(uid, [])
+                    await channel.send(embed=_build_milestone_embed(inviter_member, current_milestone, reward, invited_ids))
                 except discord.Forbidden:
                     pass
 
@@ -184,7 +198,8 @@ class Invites(commands.Cog):
 
     @setinvite.command(name="threshold")
     @commands.has_permissions(manage_guild=True)
-    async def setinvite_threshold(self, ctx: commands.Context, n: int):
+    async def setinvite_threshold(self, ctx: commands.Context, n: int, *, reward: str = ""):
+        """Ejemplo: ,setinvite threshold 10 tiene 10% más de ganar en giveaways"""
         if n < 1:
             return await ctx.send(embed=discord.Embed(
                 description="El umbral debe ser al menos `1`.",
@@ -192,11 +207,12 @@ class Invites(commands.Cog):
             ))
         cfg = _get_config(ctx.guild.id)
         cfg["threshold"] = n
+        cfg["reward"] = reward.strip()
         _save_config(ctx.guild.id, cfg)
-        await ctx.send(embed=discord.Embed(
-            description=f"Notificación cada `{n}` invitaciones.",
-            color=0x57f287,
-        ))
+        desc = f"Notificación cada `{n}` invitaciones."
+        if reward:
+            desc += "\nRecompensa: " + reward.strip()
+        await ctx.send(embed=discord.Embed(description=desc, color=0x57f287))
 
     @setinvite.command(name="altdays")
     @commands.has_permissions(manage_guild=True)
