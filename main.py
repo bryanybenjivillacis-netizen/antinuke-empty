@@ -46,6 +46,8 @@ class AntiNukeBot(commands.Bot):
             "settings",
             "vc_tracker",
             "welcome",
+            "invites",
+            "giveaway",
             "help",
         ]
         for cog in cogs:
