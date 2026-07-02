@@ -64,7 +64,7 @@ def _pick_winner(participants: list[int], bonuses: dict) -> int | None:
     return random.choice(pool)
 
 
-def _build_giveaway_embed(prize: str, end_time: datetime, ended: bool = False, winner_id: int = None) -> discord.Embed:
+def _build_giveaway_embed(prize: str, end_time: datetime, ended: bool = False, winner_id: int = None, participants: int = 0) -> discord.Embed:
     embed = discord.Embed(color=0x2b2d31)
     embed.title = f"🎉 {prize}"
     if ended:
@@ -72,12 +72,53 @@ def _build_giveaway_embed(prize: str, end_time: datetime, ended: bool = False, w
         embed.set_footer(text="Giveaway terminado")
     else:
         ts = int(end_time.timestamp())
-        embed.description = f"Reacciona con {GIVEAWAY_EMOJI} para participar.\nTermina: <t:{ts}:R>"
+        embed.description = f"Termina: <t:{ts}:R>"
+        embed.add_field(name="Participantes", value=str(participants), inline=True)
         embed.set_footer(text=f"Termina el {end_time.strftime('%d/%m/%Y %H:%M')} UTC")
     return embed
 
 
-# ── Cog ──────────────────────────────────────────────────────────────────────
+def _parse_duration(text: str) -> int | None:
+    """Convierte '1m', '2h', '3d' a segundos. Retorna None si inválido."""
+    units = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+    text = text.strip().lower()
+    if text[-1] in units and text[:-1].isdigit():
+        return int(text[:-1]) * units[text[-1]]
+    if text.isdigit():
+        return int(text)
+    return None
+
+
+class JoinGiveawayView(discord.ui.View):
+    def __init__(self, cog, guild_id: int, message_id: int):
+        super().__init__(timeout=None)
+        self.cog = cog
+        self.guild_id = guild_id
+        self.message_id = message_id
+
+    @discord.ui.button(label="🎉 Participar", style=discord.ButtonStyle.primary, custom_id="giveaway_join")
+    async def join(self, interaction: discord.Interaction, button: discord.ui.Button):
+        giveaways = _get_giveaways(self.guild_id)
+        data = giveaways.get(str(self.message_id))
+        if not data or data.get("ended"):
+            return await interaction.response.send_message("Este giveaway ya terminó.", ephemeral=True)
+        uid = interaction.user.id
+        participants = data.get("participants", [])
+        if uid in participants:
+            participants.remove(uid)
+            data["participants"] = participants
+            giveaways[str(self.message_id)] = data
+            _save_giveaways(self.guild_id, giveaways)
+            await interaction.response.send_message("Saliste del giveaway.", ephemeral=True)
+        else:
+            participants.append(uid)
+            data["participants"] = participants
+            giveaways[str(self.message_id)] = data
+            _save_giveaways(self.guild_id, giveaways)
+            await interaction.response.send_message("¡Te uniste al giveaway! 🎉", ephemeral=True)
+
+
+
 
 class Giveaway(commands.Cog):
     def __init__(self, bot: commands.Bot):
@@ -121,22 +162,15 @@ class Giveaway(commands.Cog):
         except Exception:
             return
 
-        # Obtener participantes de la reacción
-        participants = []
-        for reaction in message.reactions:
-            if str(reaction.emoji) == GIVEAWAY_EMOJI:
-                async for user in reaction.users():
-                    if not user.bot:
-                        participants.append(user.id)
-                break
+        # Participantes guardados en DB (via botón)
+        participants = data.get("participants", [])
 
         bonuses = _get_bonuses(guild_id)
         winner_id = _pick_winner(participants, bonuses)
 
-        # Actualizar embed
         end_time = datetime.fromisoformat(data["end_time"])
         embed = _build_giveaway_embed(data["prize"], end_time, ended=True, winner_id=winner_id)
-        await message.edit(embed=embed)
+        await message.edit(embed=embed, view=None)
 
         if winner_id:
             await channel.send(f"🎉 ¡Felicidades <@{winner_id}>! Ganaste **{data['prize']}**.")
@@ -154,18 +188,17 @@ class Giveaway(commands.Cog):
 
     @commands.command(name="gcreate")
     @commands.has_permissions(manage_guild=True)
-    async def gcreate(self, ctx: commands.Context, channel: discord.TextChannel, seconds: int, *, prize: str):
-        """Ejemplo: ,gcreate #giveaways 3600 Nitro"""
-        if seconds < 10:
+    async def gcreate(self, ctx: commands.Context, channel: discord.TextChannel, duration: str, *, prize: str):
+        """Ejemplo: ,gcreate #giveaways 1h Nitro | ,gcreate #giveaways 30m Rol VIP"""
+        seconds = _parse_duration(duration)
+        if not seconds or seconds < 10:
             return await ctx.send(embed=discord.Embed(
-                description="Duración mínima: `10` segundos.",
+                description="Duración inválida. Usa `1m`, `2h`, `1d`, etc. Mínimo 10 segundos.",
                 color=0xed4245,
             ))
 
         end_time = datetime.now(timezone.utc) + timedelta(seconds=seconds)
-        embed = _build_giveaway_embed(prize, end_time)
-        msg = await channel.send(embed=embed)
-        await msg.add_reaction(GIVEAWAY_EMOJI)
+        embed = _build_giveaway_embed(prize, end_time, participants=0)
 
         data = {
             "channel_id": channel.id,
@@ -175,6 +208,12 @@ class Giveaway(commands.Cog):
             "winner_id": None,
             "participants": [],
         }
+        # Mandar mensaje primero para obtener el ID
+        msg = await channel.send(embed=embed)
+
+        view = JoinGiveawayView(self, ctx.guild.id, msg.id)
+        await msg.edit(view=view)
+
         giveaways = _get_giveaways(ctx.guild.id)
         giveaways[str(msg.id)] = data
         _save_giveaways(ctx.guild.id, giveaways)
