@@ -84,9 +84,8 @@ class Giveaway(commands.Cog):
         self.bot = bot
         self._tasks: dict[str, asyncio.Task] = {}
 
-    async def cog_load(self):
-        # Reanudar giveaways activos al reiniciar el bot
-        await self.bot.wait_until_ready()
+    @commands.Cog.listener()
+    async def on_ready(self):
         for guild in self.bot.guilds:
             giveaways = _get_giveaways(guild.id)
             for msg_id, data in giveaways.items():
