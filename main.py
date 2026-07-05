@@ -34,7 +34,7 @@ class AntiNukeBot(commands.Bot):
     async def get_prefix(self, message):
         if not message.guild:
             return [","]
-        guild_data = db.get("guilds", {}).get(str(message.guild.id), {})
+        guild_data = db.get_guild(message.guild.id)
         prefix = guild_data.get("prefix", DEFAULT_PREFIX)
         return commands.when_mentioned_or(prefix)(self, message)
 
