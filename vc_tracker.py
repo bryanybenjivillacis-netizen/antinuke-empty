@@ -2,9 +2,9 @@
 vc_tracker.py — Real-time voice channel population tracker.
 
 Commands:
-  ,setvc channel #canal    — configura canal de notificaciones automáticas
-  ,setvc threshold <n>     — cada cuántas personas notifica (default 5)
-  ,vcstats                 — manda embed con total exacto en VC (manage_guild)
+  ,setvc channel #canal   — configura canal de notificaciones automáticas
+  ,setvc threshold <n>    — cada cuántas personas notifica (default 5)
+  ,vcstats                — manda embed con total exacto en VC (manage_guild)
 """
 
 import discord
@@ -18,6 +18,15 @@ log = logging.getLogger("antinuke.vc_tracker")
 # In-memory: guild_id → last notified milestone
 _last_milestone: dict[int, int] = {}
 _last_sent: dict[int, datetime] = {}  # guild_id → última vez que se mandó notif
+
+# In-memory: channel_id → webhook usado para las notificaciones automáticas
+_webhook_cache: dict[int, discord.Webhook] = {}
+
+# Banner del bot (se obtiene una sola vez y se cachea)
+_bot_banner_url: str | None = None
+_bot_banner_fetched = False
+
+WEBHOOK_NAME = "Status Tussi"
 
 
 def _get_vc_total(guild: discord.Guild) -> int:
@@ -45,13 +54,48 @@ def _save_vc_config(guild_id: int, vc_cfg: dict):
     db.update_guild(guild_id, config)
 
 
-def _build_embed(total: int, guild: discord.Guild) -> discord.Embed:
+def _build_embed(total: int, guild: discord.Guild, banner_url: str | None = None) -> discord.Embed:
     embed = discord.Embed(
         description=f"**+{total}** en VC",
         color=0x2b2d31,
     )
     embed.set_footer(text=guild.name)
+    if banner_url:
+        embed.set_image(url=banner_url)
     return embed
+
+
+async def _get_bot_banner_url(bot: commands.Bot) -> str | None:
+    """Obtiene el banner del bot una sola vez (se cachea en memoria)."""
+    global _bot_banner_url, _bot_banner_fetched
+    if not _bot_banner_fetched:
+        _bot_banner_fetched = True
+        try:
+            full_user = await bot.fetch_user(bot.user.id)
+            if full_user.banner:
+                _bot_banner_url = full_user.banner.url
+        except Exception as e:
+            log.warning(f"No se pudo obtener el banner del bot: {e}")
+    return _bot_banner_url
+
+
+async def _get_vc_webhook(channel: discord.TextChannel) -> discord.Webhook | None:
+    """Busca o crea el webhook 'Status Tussi' en el canal, y lo cachea."""
+    if channel.id in _webhook_cache:
+        return _webhook_cache[channel.id]
+    try:
+        webhooks = await channel.webhooks()
+        webhook = discord.utils.get(webhooks, name=WEBHOOK_NAME)
+        if webhook is None:
+            webhook = await channel.create_webhook(name=WEBHOOK_NAME)
+        _webhook_cache[channel.id] = webhook
+        return webhook
+    except discord.Forbidden:
+        log.warning(f"No permission to manage webhooks in #{channel.name}")
+        return None
+    except Exception as e:
+        log.error(f"Error creating VC webhook: {e}")
+        return None
 
 
 class VCTracker(commands.Cog):
@@ -59,7 +103,6 @@ class VCTracker(commands.Cog):
         self.bot = bot
 
     # ── Voice state update ────────────────────────────────────────────────────
-
     @commands.Cog.listener()
     async def on_voice_state_update(
         self,
@@ -90,15 +133,27 @@ class VCTracker(commands.Cog):
             current_milestone = (total // threshold) * threshold
             if current_milestone > last and current_milestone > 0:
                 _last_milestone[guild.id] = current_milestone
+
                 # Cooldown: no enviar más de una vez cada 12 minutos
                 last_sent = _last_sent.get(guild.id)
                 if last_sent and (datetime.now(timezone.utc) - last_sent).total_seconds() < 720:
                     return
                 _last_sent[guild.id] = datetime.now(timezone.utc)
+
                 channel = guild.get_channel(int(vc_cfg["channel_id"]))
                 if channel:
                     try:
-                        await channel.send(embed=_build_embed(total, guild))
+                        banner_url = await _get_bot_banner_url(self.bot)
+                        embed = _build_embed(total, guild, banner_url)
+                        webhook = await _get_vc_webhook(channel)
+                        if webhook:
+                            await webhook.send(
+                                embed=embed,
+                                username=WEBHOOK_NAME,
+                                avatar_url=self.bot.user.display_avatar.url,
+                            )
+                        else:
+                            await channel.send(embed=embed)
                     except discord.Forbidden:
                         log.warning(f"[{guild.name}] No permission to send VC notification.")
                     except Exception as e:
@@ -109,7 +164,6 @@ class VCTracker(commands.Cog):
                 _last_milestone[guild.id] = current_milestone
 
     # ── Commands ──────────────────────────────────────────────────────────────
-
     @commands.group(name="setvc", invoke_without_command=True)
     @commands.has_permissions(manage_guild=True)
     async def setvc(self, ctx: commands.Context):
@@ -150,7 +204,6 @@ class VCTracker(commands.Cog):
         ))
 
     # ── ,vcstats ──────────────────────────────────────────────────────────────
-
     @commands.command(name="vcstats")
     @commands.has_permissions(manage_guild=True)
     async def vcstats(self, ctx: commands.Context):
