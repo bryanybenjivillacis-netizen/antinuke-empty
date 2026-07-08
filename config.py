@@ -1,11 +1,10 @@
-import os
-from pymongo import MongoClient
+import json
+from pathlib import Path
 
 DEFAULT_PREFIX = ","
 
-_client = MongoClient(os.getenv("MONGO_URI"))
-_db = _client["bot2"]
-_guilds = _db["guilds"]
+DATA_DIR = Path("data")
+DB_FILE = DATA_DIR / "db.json"
 
 
 def default_guild_config() -> dict:
@@ -58,30 +57,46 @@ def default_guild_config() -> dict:
     }
 
 
+def _load() -> dict:
+    if not DB_FILE.exists():
+        return {"meta": {}, "guilds": {}}
+    with open(DB_FILE, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    data.setdefault("meta", {})
+    data.setdefault("guilds", {})
+    return data
+
+
+def _save(data: dict) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    with open(DB_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+
+
 class Database:
     def get(self, key, default=None):
-        doc = _db["meta"].find_one({"_id": key})
-        return doc.get("value", default) if doc else default
+        return _load()["meta"].get(key, default)
 
     def set(self, key, value):
-        _db["meta"].replace_one({"_id": key}, {"_id": key, "value": value}, upsert=True)
+        data = _load()
+        data["meta"][key] = value
+        _save(data)
 
     def get_guild(self, guild_id: int) -> dict:
-        doc = _guilds.find_one({"_id": str(guild_id)})
-        if doc:
-            doc.pop("_id", None)
-            return doc
+        data = _load()
+        gid = str(guild_id)
+        if gid in data["guilds"]:
+            return data["guilds"][gid]
         config = default_guild_config()
-        _guilds.insert_one({"_id": str(guild_id), **config})
+        data["guilds"][gid] = config
+        _save(data)
         return config
 
     def update_guild(self, guild_id: int, config: dict):
         config.pop("_id", None)
-        _guilds.replace_one(
-            {"_id": str(guild_id)},
-            {"_id": str(guild_id), **config},
-            upsert=True,
-        )
+        data = _load()
+        data["guilds"][str(guild_id)] = config
+        _save(data)
 
 
 db = Database()
