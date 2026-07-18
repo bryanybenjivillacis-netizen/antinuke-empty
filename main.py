@@ -49,6 +49,7 @@ class AntiNukeBot(commands.Bot):
             "invites",
             "giveaway",
             "help",
+            "lockdown",
         ]
         for cog in cogs:
             try:
@@ -95,6 +96,7 @@ async def main():
     if not token:
         log.critical("TOKEN environment variable not set.")
         return
+
     bot = AntiNukeBot()
     async with bot:
         await bot.start(token)
