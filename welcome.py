@@ -3,13 +3,14 @@ welcome.py — Sistema de bienvenida con sintaxis $v{} compatible con Bender.
 
 Comandos:
   ,welcome add #canal {embed}$v{message: ...}$v{author: ...}$v{description: ...}
-           $v{thumbnail: {user.avatar}}$v{button: url && texto && /e && enabled}
-  ,welcome list          — ver entradas activas
-  ,welcome remove <n>    — eliminar entrada por número
-  ,welcome test          — previsualizar con tu usuario
-  ,welcome off           — desactivar todos los welcomes de este servidor
+                       $v{thumbnail: {user.avatar}}$v{button: url && texto && /e && enabled}
+  ,welcome list                 — ver entradas activas
+  ,welcome remove <n>           — eliminar entrada por número
+  ,welcome test                 — previsualizar con tu usuario
+  ,welcome off                  — desactivar todos los welcomes de este servidor
 
-Variables disponibles: {user.mention} {user.tag} {user.avatar} {guild.count}
+Variables disponibles: {user.mention} {user.tag} {user.name} {user.avatar} {user.id}
+                        {guild.name} {guild.id} {guild.icon} {guild.count} {guild.vanity}
 """
 
 import discord
@@ -79,18 +80,24 @@ def _parse_vargs(text: str) -> dict:
                 pass
         else:
             result[key] = value
-
     return result
 
 
 def _resolve_vars(text: str, member: discord.Member) -> str:
-    """Reemplaza {user.mention}, {user.tag}, {user.avatar}, {guild.count}."""
+    """Reemplaza {user.mention}, {user.tag}, {user.name}, {user.avatar}, {user.id}, {guild.name}, {guild.id}, {guild.icon}, {guild.count}, {guild.vanity}."""
+    guild = member.guild
     return (
         text
         .replace("{user.mention}", member.mention)
         .replace("{user.tag}", str(member))
+        .replace("{user.name}", member.display_name)
         .replace("{user.avatar}", member.display_avatar.url)
-        .replace("{guild.count}", str(member.guild.member_count))
+        .replace("{user.id}", str(member.id))
+        .replace("{guild.name}", guild.name)
+        .replace("{guild.id}", str(guild.id))
+        .replace("{guild.icon}", guild.icon.url if guild.icon else "")
+        .replace("{guild.count}", str(guild.member_count))
+        .replace("{guild.vanity}", guild.vanity_url_code or "")
     )
 
 
@@ -154,12 +161,15 @@ class Welcome(commands.Cog):
     async def on_member_join(self, member: discord.Member):
         if member.bot:
             return
+
         entries = _get_welcomes(member.guild.id)
         for entry in entries:
             channel = member.guild.get_channel(int(entry["channel_id"]))
             if not channel:
                 continue
+
             embed, content, buttons = _build_embed(entry, member)
+
             try:
                 if buttons:
                     view = discord.ui.View()
@@ -193,11 +203,11 @@ class Welcome(commands.Cog):
 
         entry = {
             "channel_id": channel.id,
-            "message":     parsed.get("message", ""),
-            "author":      parsed.get("author", ""),
+            "message": parsed.get("message", ""),
+            "author": parsed.get("author", ""),
             "description": parsed.get("description", ""),
-            "thumbnail":   parsed.get("thumbnail", ""),
-            "buttons":     parsed.get("buttons", []),
+            "thumbnail": parsed.get("thumbnail", ""),
+            "buttons": parsed.get("buttons", []),
         }
 
         entries = _get_welcomes(ctx.guild.id)
@@ -218,11 +228,13 @@ class Welcome(commands.Cog):
                 description="No hay welcomes configurados.",
                 color=0x2b2d31,
             ))
+
         lines = []
         for i, e in enumerate(entries, 1):
             ch = ctx.guild.get_channel(int(e["channel_id"]))
             ch_mention = ch.mention if ch else f"`{e['channel_id']}`"
             lines.append(f"**{i}.** {ch_mention}")
+
         await ctx.send(embed=discord.Embed(
             title="Welcome entries",
             description="\n".join(lines),
@@ -238,8 +250,10 @@ class Welcome(commands.Cog):
                 description=f"Número inválido. Hay `{len(entries)}` entradas.",
                 color=0xed4245,
             ))
+
         removed = entries.pop(n - 1)
         _save_welcomes(ctx.guild.id, entries)
+
         ch = ctx.guild.get_channel(int(removed["channel_id"]))
         await ctx.send(embed=discord.Embed(
             description=f"Entrada #{n} eliminada ({ch.mention if ch else 'canal desconocido'}).",
@@ -255,9 +269,11 @@ class Welcome(commands.Cog):
                 description="No hay welcomes configurados. Usa `,welcome add` primero.",
                 color=0x2b2d31,
             ))
+
         # Previsualiza la primera entrada en el canal actual
         entry = entries[0]
         embed, content, buttons = _build_embed(entry, ctx.author)
+
         if buttons:
             view = discord.ui.View()
             for btn in buttons:
