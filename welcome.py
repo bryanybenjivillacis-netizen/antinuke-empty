@@ -3,7 +3,8 @@ welcome.py — Sistema de bienvenida con sintaxis $v{} compatible con Bender.
 
 Comandos:
   ,welcome add #canal {embed}$v{message: ...}$v{author: ...}$v{description: ...}
-                       $v{thumbnail: {user.avatar}}$v{button: url && texto && /e && enabled}
+                       $v{thumbnail: {user.avatar}}$v{footer: texto && url_icono}
+                       $v{timestamp}$v{button: url && texto && emoji}
   ,welcome list                 — ver entradas activas
   ,welcome remove <n>           — eliminar entrada por número
   ,welcome test                 — previsualizar con tu usuario
@@ -11,8 +12,14 @@ Comandos:
 
 Variables disponibles: {user.mention} {user.tag} {user.name} {user.avatar} {user.id}
                         {guild.name} {guild.id} {guild.icon} {guild.count} {guild.vanity}
+
+Botón: el emoji acepta <:nombre:id>, <a:nombre:id>, :id: (solo el ID) o un emoji unicode real.
+Texto no reconocido como emoji (ej. "/e") se ignora en vez de romper el botón.
+El botón se activa por defecto — solo se descarta si el texto incluye la palabra "disabled".
+$v{timestamp} agrega la hora actual al pie del embed (formato nativo de Discord).
 """
 
+import re
 import discord
 from discord.ext import commands
 from config import db
@@ -59,6 +66,11 @@ def _parse_vargs(text: str) -> dict:
     """
     result = {"buttons": []}
     for block in _extract_vblocks(text):
+        # Bloques sin valor, ej. $v{timestamp}
+        if block.strip().lower() == "timestamp":
+            result["timestamp"] = True
+            continue
+
         # Separar key: value en el primer ':'
         if ':' not in block:
             continue
@@ -67,17 +79,15 @@ def _parse_vargs(text: str) -> dict:
         value = value.strip()
 
         if key == "button":
-            # formato: url && texto && /emoji && enabled
+            # formato: url && texto && emoji && (disabled opcional)
             parts = [p.strip() for p in value.split("&&")]
-            # parts[0]=url, parts[1]=texto, parts[2]=emoji_o_path, parts[3]=enabled
+            # parts[0]=url, parts[1]=texto, parts[2]=emoji
             url = parts[0] if len(parts) > 0 else ""
             label = parts[1] if len(parts) > 1 else "Click"
-            enabled = "enabled" in value.lower()
-            if enabled and url:
-                result["buttons"].append({"url": url, "label": label})
-            elif enabled and not url:
-                # botón sin url (guild.count style) — lo ignoramos, no soportado por discord.py sin url
-                pass
+            emoji_raw = parts[2] if len(parts) > 2 else ""
+            disabled = "disabled" in value.lower()
+            if url and not disabled:
+                result["buttons"].append({"url": url, "label": label, "emoji": emoji_raw})
         else:
             result[key] = value
     return result
@@ -99,6 +109,27 @@ def _resolve_vars(text: str, member: discord.Member) -> str:
         .replace("{guild.count}", str(guild.member_count))
         .replace("{guild.vanity}", guild.vanity_url_code or "")
     )
+
+
+def _parse_emoji(raw: str):
+    """Convierte texto de emoji (<:nombre:id>, <a:nombre:id>, :id: o unicode) en discord.PartialEmoji."""
+    raw = raw.strip()
+    if not raw:
+        return None
+    m = re.match(r"<(a?):(\w+):(\d+)>", raw)
+    if m:
+        animated, name, eid = m.groups()
+        return discord.PartialEmoji(name=name, id=int(eid), animated=bool(animated))
+    m = re.match(r":(\d+):$", raw)
+    if m:
+        # Solo trae el ID, sin nombre — se usa un nombre genérico como placeholder.
+        return discord.PartialEmoji(name="e", id=int(m.group(1)))
+    if any(ord(c) > 127 for c in raw):
+        # Emoji unicode real (ej. 🎉)
+        return discord.PartialEmoji(name=raw)
+    # Texto no reconocido como emoji (ej. "/e", "/skill-creator") — se ignora
+    # en vez de romper el botón o hacer que Discord rechace el mensaje.
+    return None
 
 
 def _build_embed(entry: dict, member: discord.Member) -> tuple[discord.Embed, str, list[discord.ui.Button]]:
@@ -127,13 +158,25 @@ def _build_embed(entry: dict, member: discord.Member) -> tuple[discord.Embed, st
         if resolved.startswith("http"):
             embed.set_thumbnail(url=resolved)
 
+    footer_raw = entry.get("footer", "")
+    if footer_raw:
+        # formato: "texto && url_icono" — el && separa texto de icon_url opcional
+        parts = [p.strip() for p in footer_raw.split("&&")]
+        footer_text = _resolve_vars(parts[0], member)
+        icon_url = parts[1] if len(parts) > 1 and parts[1].startswith("http") else None
+        embed.set_footer(text=footer_text, icon_url=icon_url)
+
+    if entry.get("timestamp"):
+        embed.timestamp = discord.utils.utcnow()
+
     # Botones
     buttons = []
     for btn in entry.get("buttons", []):
         url = _resolve_vars(btn["url"], member)
         label = _resolve_vars(btn["label"], member)
+        emoji = _parse_emoji(_resolve_vars(btn.get("emoji", ""), member))
         if url.startswith("http"):
-            buttons.append(discord.ui.Button(label=label, url=url, style=discord.ButtonStyle.link))
+            buttons.append(discord.ui.Button(label=label, url=url, emoji=emoji, style=discord.ButtonStyle.link))
 
     return embed, content, buttons
 
@@ -207,6 +250,8 @@ class Welcome(commands.Cog):
             "author": parsed.get("author", ""),
             "description": parsed.get("description", ""),
             "thumbnail": parsed.get("thumbnail", ""),
+            "footer": parsed.get("footer", ""),
+            "timestamp": parsed.get("timestamp", False),
             "buttons": parsed.get("buttons", []),
         }
 
