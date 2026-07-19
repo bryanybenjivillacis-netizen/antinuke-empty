@@ -20,6 +20,7 @@ $v{timestamp} agrega la hora actual al pie del embed (formato nativo de Discord)
 """
 
 import re
+from urllib.parse import urlparse
 import discord
 from discord.ext import commands
 from config import db
@@ -132,6 +133,15 @@ def _parse_emoji(raw: str):
     return None
 
 
+def _is_valid_url(url: str) -> bool:
+    """Valida que la URL tenga esquema http(s) y dominio, para evitar que Discord la rechace."""
+    try:
+        parsed = urlparse(url)
+        return parsed.scheme in ("http", "https") and bool(parsed.netloc)
+    except ValueError:
+        return False
+
+
 def _build_embed(entry: dict, member: discord.Member) -> tuple[discord.Embed, str, list[discord.ui.Button]]:
     """Construye embed + content + botones a partir de una entrada guardada."""
     # Content (mensaje fuera del embed)
@@ -175,7 +185,7 @@ def _build_embed(entry: dict, member: discord.Member) -> tuple[discord.Embed, st
         url = _resolve_vars(btn["url"], member)
         label = _resolve_vars(btn["label"], member)
         emoji = _parse_emoji(_resolve_vars(btn.get("emoji", ""), member))
-        if url.startswith("http"):
+        if _is_valid_url(url):
             buttons.append(discord.ui.Button(label=label, url=url, emoji=emoji, style=discord.ButtonStyle.link))
 
     return embed, content, buttons
