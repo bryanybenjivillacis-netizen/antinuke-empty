@@ -91,6 +91,10 @@ class AntiNukeBot(commands.Bot):
             ))
         else:
             log.error(f"Error en {ctx.command}: {error}")
+            await ctx.send(embed=discord.Embed(
+                description=f"Ocurrió un error ejecutando el comando: `{error}`",
+                color=0xed4245,
+            ))
 
 
 async def main():
