@@ -1,17 +1,22 @@
-import json
-from pathlib import Path
+import os
+from pymongo import MongoClient
 
 DEFAULT_PREFIX = ","
 
-DATA_DIR = Path("data")
-DB_FILE = DATA_DIR / "db.json"
+_client = MongoClient(os.getenv("MONGO_URI"))
+_db = _client["bot2"]
+_guilds = _db["guilds"]
 
 
 def default_guild_config() -> dict:
     return {
         "prefix": DEFAULT_PREFIX,
         "log_channel": None,
+        "modlog_channel": None,
         "whitelist": [],
+        "antinuke_admins": [],
+        "panic_active": False,
+        "panic_state": {},
         "antinuke": {
             "enabled": False,
             "punishment": "ban",
@@ -46,6 +51,7 @@ def default_guild_config() -> dict:
             "anti_everyone_mention": True,
             "anti_server_update": True,
             "anti_prune": True,
+            "anti_role_add": True,
             "min_account_age_days": 0,
             "min_guild_age_days": 0,
         },
@@ -57,46 +63,31 @@ def default_guild_config() -> dict:
     }
 
 
-def _load() -> dict:
-    if not DB_FILE.exists():
-        return {"meta": {}, "guilds": {}}
-    with open(DB_FILE, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    data.setdefault("meta", {})
-    data.setdefault("guilds", {})
-    return data
-
-
-def _save(data: dict) -> None:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    with open(DB_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
-
-
 class Database:
     def get(self, key, default=None):
-        return _load()["meta"].get(key, default)
+        doc = _db["meta"].find_one({"_id": key})
+        return doc.get("value", default) if doc else default
 
     def set(self, key, value):
-        data = _load()
-        data["meta"][key] = value
-        _save(data)
+        _db["meta"].replace_one({"_id": key}, {"_id": key, "value": value}, upsert=True)
 
     def get_guild(self, guild_id: int) -> dict:
-        data = _load()
-        gid = str(guild_id)
-        if gid in data["guilds"]:
-            return data["guilds"][gid]
+        doc = _guilds.find_one({"_id": str(guild_id)})
+        if doc:
+            doc.pop("_id", None)
+            return doc
+
         config = default_guild_config()
-        data["guilds"][gid] = config
-        _save(data)
+        _guilds.insert_one({"_id": str(guild_id), **config})
         return config
 
     def update_guild(self, guild_id: int, config: dict):
         config.pop("_id", None)
-        data = _load()
-        data["guilds"][str(guild_id)] = config
-        _save(data)
+        _guilds.replace_one(
+            {"_id": str(guild_id)},
+            {"_id": str(guild_id), **config},
+            upsert=True,
+        )
 
 
 db = Database()
